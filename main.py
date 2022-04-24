@@ -47,15 +47,37 @@ colors = {
     },
 }
 
+rpc = BitcoinRPC(net_name="signet")
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("seed")
     argv = parser.parse_args(sys.argv)
 
-    print(f'> generating transactions for spacechain "{argv.seed}"...')
+    print(yellow(f'> generating transactions for spacechain "{argv.seed}"...'))
     txs = pregenerate_transactions(argv.seed)
+    print_txs(txs)
 
+    print()
+    print(yellow(f"> identifying transactions that are already spent..."))
+    for tx in txs:
+        txid = bytes_to_txid(tx.GetTxid())
+        try:
+            raw = rpc.getrawtransaction(txid)
+        except Exception as exc:
+            if "No such mempool or blockchain transaction." in str(exc):
+                print(f"- {white(txid)}: waiting")
+                break
+            else:
+                raise exc
+
+        print(f"- {white(txid)}: spent")
+
+    print()
+
+
+def print_txs(txs):
     for i in range(len(txs)):
         txid_color = lambda x: colors[i % len(colors)]["txid"](bold(x))
         prevout_color = lambda x: colors[i % len(colors)]["prevout"](bold(x))
