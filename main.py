@@ -55,6 +55,7 @@ def main():
 
     print(f'> generating transactions for spacechain "{argv.seed}"...')
     txs = pregenerate_transactions(argv.seed)
+
     for i in range(len(txs)):
         txid_color = colors[i % len(colors)]["txid"]
         prevout_color = colors[i % len(colors)]["prevout"]
@@ -62,7 +63,16 @@ def main():
 
         tx = txs[i]
         shorten_txid = txid_color(shorten(bytes_to_txid(tx.GetTxid())))
-        shorten_ctv_hash = ctv_color(shorten(get_standard_template_hash(tx, 0).hex()))
+        print(bold(f"tx {i+1} ~"))
+        print(f"  id: {bold(shorten_txid)}")
+
+        if i > 0:
+            shorten_ctv_hash = ctv_color(
+                shorten(get_standard_template_hash(tx, 0).hex())
+            )
+            print(f"  CTV hash: {shorten_ctv_hash}")
+
+        # inputs
         prevout_0_txid, prevout_0_n = str(tx.vin[0].prevout).split(":")
         shorten_prevout_0 = ":".join(
             [prevout_color(shorten(prevout_0_txid)), prevout_0_n]
@@ -77,15 +87,16 @@ def main():
                 ]
             )
         )
-        outscript_0 = white(format_cscript(tx.vout[0].scriptPubKey))
-        outscript_1 = white(format_cscript(tx.vout[1].scriptPubKey))
-        print(bold(f"tx {i+1} ~"))
-        print(f"  id: {bold(shorten_txid)}")
-        print(f"  ctvhash: {shorten_ctv_hash}")
         print(f"    vin[0] = [{shorten_prevout_0}] {redeem_script_0}")
-        print(f"    vin[1] = empty")
+        if len(tx.vin) > 1:
+            print(f"    vin[1] = empty")
+
+        # outputs
+        outscript_0 = white(format_cscript(tx.vout[0].scriptPubKey))
         print(f"    vout[0] = {italic(tx.vout[0].nValue)}sat 🠖 {outscript_0}")
-        print(f"    vout[1] = {italic(tx.vout[1].nValue)}sat 🠖 {outscript_1}")
+        if len(tx.vout) > 1:
+            outscript_1 = white(format_cscript(tx.vout[1].scriptPubKey))
+            print(f"    vout[1] = {italic(tx.vout[1].nValue)}sat 🠖 {outscript_1}")
 
 
 def pregenerate_transactions(seed):
@@ -95,7 +106,7 @@ def pregenerate_transactions(seed):
     last.vin = [CTxIn()]  # blank because CTV in p2wsh
     last.vout = [
         CTxOut(
-            SATS_AMOUNT,
+            0,
             # the chain of transactions ends here with an OP_RETURN
             CScript([script.OP_RETURN, seed.encode("utf-8")]),
         )
@@ -134,12 +145,12 @@ def pregenerate_transactions(seed):
 
     # reverse the list so we start with the first transaction
     # and also add the correct inputs
-    txs = [txs_reversed[-1]]
-    for i in range(len(txs_reversed) - 2, 0, -1):
+    txs = []
+    for i in range(len(txs_reversed) - 2, -1, -1):
         this = txs_reversed[i]
-        next = txs_reversed[i + 1]
+        prev = txs_reversed[i - 1]
         this.vin[0] = CTxIn(
-            COutPoint(next.GetTxid(), 0),
+            COutPoint(prev.GetTxid(), 0),
             # redeem_script
             CScript(
                 [
@@ -150,7 +161,12 @@ def pregenerate_transactions(seed):
         )
         txs.append(this)
 
-    return txs
+    first = txs_reversed[-1]
+    first.vin = [first.vin[0]]
+
+    last = txs_reversed[0]
+
+    return [first, *txs, last]
 
 
 if __name__ == "__main__":
