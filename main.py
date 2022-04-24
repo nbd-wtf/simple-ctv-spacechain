@@ -23,7 +23,7 @@ from buidl.ecc import S256Point
 from rpc import BitcoinRPC, JSONRPCError
 from utils import *
 
-CHAIN_MAX = 4
+CHAIN_MAX = 3
 SATS_AMOUNT = 1000
 OP_CHECKTEMPLATEVERIFY = script.OP_NOP4
 anyone_can_spend = CScript([script.OP_TRUE])
@@ -31,19 +31,19 @@ anyone_can_spend = CScript([script.OP_TRUE])
 colors = {
     0: {
         "prevout": lambda x: magenta(x),
-        "txid": lambda x: bold(cyan(x)),
+        "txid": lambda x: cyan(x),
     },
     1: {
         "prevout": lambda x: cyan(x),
-        "txid": lambda x: bold(green(x)),
+        "txid": lambda x: green(x),
     },
     2: {
         "prevout": lambda x: green(x),
-        "txid": lambda x: bold(blue(x)),
+        "txid": lambda x: blue(x),
     },
     3: {
         "prevout": lambda x: blue(x),
-        "txid": lambda x: bold(magenta(x)),
+        "txid": lambda x: magenta(x),
     },
 }
 
@@ -57,12 +57,15 @@ def main():
     txs = pregenerate_transactions(argv.seed)
 
     for i in range(len(txs)):
-        txid_color = colors[i % len(colors)]["txid"]
-        prevout_color = colors[i % len(colors)]["prevout"]
-        ctv_color = lambda x: yellow(x)
+        txid_color = lambda x: colors[i % len(colors)]["txid"](bold(x))
+        prevout_color = lambda x: colors[i % len(colors)]["prevout"](bold(x))
+        ctv_color = lambda x: red(x)
 
         tx = txs[i]
-        shorten_txid = txid_color(shorten(bytes_to_txid(tx.GetTxid())))
+        shorten_txid = shorten(bytes_to_txid(tx.GetTxid()))
+        if i < len(txs) - 1:
+            shorten_txid = txid_color(shorten_txid)
+
         print(bold(f"tx {i+1} ~"))
         print(f"  id: {bold(shorten_txid)}")
 
@@ -73,29 +76,37 @@ def main():
             print(f"  CTV hash: {shorten_ctv_hash}")
 
         # inputs
-        prevout_0_txid, prevout_0_n = str(tx.vin[0].prevout).split(":")
-        shorten_prevout_0 = ":".join(
-            [prevout_color(shorten(prevout_0_txid)), prevout_0_n]
-        )
-        redeem_script_0 = italic(
-            " ".join(
+        if i == 0:
+            print(f"    vin[0] = empty")
+        else:
+            prevout_0_txid, prevout_0_n = str(tx.vin[0].prevout).split(":")
+            shorten_prevout_0 = ":".join(
+                [prevout_color(shorten(prevout_0_txid)), prevout_0_n]
+            )
+            redeem_script_0 = " ".join(
                 [
                     "OP_CHECKTEMPLATEVERIFY"
                     if el == CScriptOp(0xB3)
-                    else ctv_color(shorten(el.hex()))
+                    else shorten(el.hex())
                     for el in tx.vin[0].scriptSig
                 ]
             )
-        )
-        print(f"    vin[0] = [{shorten_prevout_0}] {redeem_script_0}")
+            if "OP_CHECKTEMPLATEVERIFY" in redeem_script_0:
+                redeem_script_0 = "{" + ctv_color(redeem_script_0) + "}"
+
+            sh = prevout_color(shorten(sha256(tx.vin[0].scriptSig).hex()))
+            print(f"    vin[0] = [{shorten_prevout_0}] {redeem_script_0} (hash: {sh})")
         if len(tx.vin) > 1:
             print(f"    vin[1] = empty")
 
         # outputs
-        outscript_0 = white(format_cscript(tx.vout[0].scriptPubKey))
+        outscript_0 = format_cscript(tx.vout[0].scriptPubKey)
+        if "OP_RETURN" not in outscript_0:
+            outscript_0 = "{" + txid_color(outscript_0) + "}"
+
         print(f"    vout[0] = {italic(tx.vout[0].nValue)}sat 🠖 {outscript_0}")
         if len(tx.vout) > 1:
-            outscript_1 = white(format_cscript(tx.vout[1].scriptPubKey))
+            outscript_1 = white("{" + format_cscript(tx.vout[1].scriptPubKey) + "}")
             print(f"    vout[1] = {italic(tx.vout[1].nValue)}sat 🠖 {outscript_1}")
 
 
@@ -144,11 +155,13 @@ def pregenerate_transactions(seed):
         next = prev
 
     # reverse the list so we start with the first transaction
+    txs_normal = list(reversed(txs_reversed))
+
     # and also add the correct inputs
     txs = []
-    for i in range(len(txs_reversed) - 2, -1, -1):
-        this = txs_reversed[i]
-        prev = txs_reversed[i - 1]
+    for i in range(0, len(txs_normal)):
+        this = txs_normal[i]
+        prev = txs_normal[i - 1]
         this.vin[0] = CTxIn(
             COutPoint(prev.GetTxid(), 0),
             # redeem_script
@@ -161,12 +174,10 @@ def pregenerate_transactions(seed):
         )
         txs.append(this)
 
-    first = txs_reversed[-1]
+    first = txs_normal[0]
     first.vin = [first.vin[0]]
 
-    last = txs_reversed[0]
-
-    return [first, *txs, last]
+    return [first, *txs]
 
 
 if __name__ == "__main__":

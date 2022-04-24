@@ -49,7 +49,9 @@ def get_standard_template_hash(tx: CTransaction, nIn: int) -> bytes:
 
 
 def format_cscript(script: CScript) -> str:
-    return " ".join([str(el) if el in OPCODE_NAMES else el.hex() for el in script])
+    return " ".join(
+        [str(el) if el in OPCODE_NAMES else shorten(el.hex()) for el in script]
+    )
 
 
 def txid_to_bytes(txid: str) -> bytes:
