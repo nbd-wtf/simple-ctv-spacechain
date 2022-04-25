@@ -1,11 +1,111 @@
 import struct
 import hashlib
-from bitcoin.core import CTransaction, COutPoint
+from typing import List
+from dataclasses import dataclass
+from bitcoin.core import (
+    script,
+    CMutableTransaction,
+    CTransaction,
+    COutPoint,
+    COIN,
+    CTxWitness,
+    CTxInWitness,
+    CScriptWitness,
+)
 from bitcoin.core.script import CScript, OPCODE_NAMES
+from bitcoin.wallet import CBech32BitcoinAddress
+from buidl.hd import HDPrivateKey, PrivateKey
+from rpc import BitcoinRPC, JSONRPCError
+
+rpc = BitcoinRPC(net_name="signet")
 
 
 def log(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
+
+
+@dataclass
+class Wallet:
+    privkey: PrivateKey
+    coins: List["Coin"]
+
+    @classmethod
+    def generate(cls, seed: bytes) -> "Wallet":
+        return cls(
+            HDPrivateKey.from_seed(seed, network="signet").get_private_key(1),
+            [],
+        )
+
+    def scan(self):
+        res = rpc.scantxoutset("start", [f"addr({self.address})"])
+        for utxo in res["unspents"]:
+            self.coins.append(
+                Coin(
+                    self,
+                    COutPoint(txid_to_bytes(utxo["txid"]), utxo["vout"]),
+                    int(utxo["amount"] * COIN),
+                    bytes.fromhex(utxo["scriptPubKey"]),
+                    utxo["height"],
+                )
+            )
+
+    @property
+    def address(self):
+        return self.privkey.point.p2wpkh_address(network="signet")
+
+    @property
+    def max_sendable(self):
+        if not self.coins:
+            return 0
+        return max([coin.satoshis for coin in self.coins])
+
+    @property
+    def biggest_coin(self):
+        for coin in self.coins:
+            if coin.satoshis == self.max_sendable:
+                return coin
+
+        raise ValueError("no coins!")
+
+
+@dataclass(frozen=True)
+class Coin:
+    wallet: Wallet
+    outpoint: COutPoint
+    satoshis: int
+    scriptPubKey: bytes
+    height: int
+
+    def sign(self, tx: CMutableTransaction, input_index: int):
+        spend_from_addr = CBech32BitcoinAddress.from_scriptPubKey(
+            CScript(self.scriptPubKey)
+        )
+
+        # standard p2wpkh redeemScript
+        redeem_script = CScript(
+            [
+                script.OP_DUP,
+                script.OP_HASH160,
+                spend_from_addr,
+                script.OP_EQUALVERIFY,
+                script.OP_CHECKSIG,
+            ]
+        )
+
+        sighash = script.SignatureHash(
+            redeem_script,
+            tx,
+            input_index,
+            script.SIGHASH_ALL,
+            amount=self.satoshis,
+            sigversion=script.SIGVERSION_WITNESS_V0,
+        )
+        sig = self.wallet.privkey.sign(int.from_bytes(sighash, "big")).der() + bytes(
+            [script.SIGHASH_ALL]
+        )
+        wit = [CTxInWitness(CScriptWitness([sig, self.wallet.privkey.point.sec()]))]
+        tx.wit = CTxWitness(wit)
+        return CTransaction.from_tx(tx)
 
 
 def sha256(s) -> bytes:
@@ -73,7 +173,7 @@ def to_outpoint(txid: str, n: int) -> COutPoint:
 
 
 def scan_utxos(rpc, addr):
-    return rpc.scantxoutset("start", [f"addr({addr})"])
+    return
 
 
 def make_color(start, end):
