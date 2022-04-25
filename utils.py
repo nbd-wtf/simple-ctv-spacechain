@@ -1,7 +1,12 @@
+import io
+import json
 import struct
+import shelve
 import hashlib
-from typing import List
+import requests
+from typing import List, Optional
 from dataclasses import dataclass
+from contextlib import contextmanager
 from bitcoin.core import (
     script,
     CMutableTransaction,
@@ -15,13 +20,49 @@ from bitcoin.core import (
 from bitcoin.core.script import CScript, OPCODE_NAMES
 from bitcoin.wallet import CBech32BitcoinAddress
 from buidl.hd import HDPrivateKey, PrivateKey
-from rpc import BitcoinRPC, JSONRPCError
-
-rpc = BitcoinRPC(net_name="signet")
 
 
 def log(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
+
+
+def ctvsignet(path: str, body: str = None):
+    if body:
+        r = requests.post(
+            f"https://explorer.ctvsignet.com/api/v1" + path,
+            data=body,
+            headers={"content-type": "text/plain"},
+        )
+    else:
+        r = requests.get(f"https://explorer.ctvsignet.com/api/v1" + path)
+
+    if not r.ok:
+        raise requests.exceptions.HTTPError(r.text)
+
+    try:
+        return json.loads(r.text)
+    except json.decoder.JSONDecodeError:
+        return r.text
+
+
+@contextmanager
+def s():
+    try:
+        db = shelve.open("spacechain.db", writeback=True)
+        yield db
+    finally:
+        db.close()
+
+
+@dataclass
+class SpacechainTx:
+    tmpl_bytes: Optional[bytes]
+    id: Optional[str]
+
+    @property
+    def template(self):
+        if self.tmpl_bytes:
+            return unmarshal_tx(self.tmpl_bytes)
 
 
 @dataclass
@@ -37,17 +78,31 @@ class Wallet:
         )
 
     def scan(self):
-        res = rpc.scantxoutset("start", [f"addr({self.address})"])
-        for utxo in res["unspents"]:
-            self.coins.append(
-                Coin(
-                    self,
-                    COutPoint(txid_to_bytes(utxo["txid"]), utxo["vout"]),
-                    int(utxo["amount"] * COIN),
-                    bytes.fromhex(utxo["scriptPubKey"]),
-                    utxo["height"],
-                )
-            )
+        self.coins = []
+        txs = ctvsignet(f"/address/{self.address}/txs")
+        unspent = []
+        for tx in txs:
+            if tx["status"]["confirmed"]:
+                for i, out in enumerate(tx["vout"]):
+                    if out["scriptpubkey_address"] == self.address:
+                        unspent.append(
+                            Coin(
+                                self,
+                                COutPoint(txid_to_bytes(tx["txid"]), i),
+                                int(out["value"]),
+                                bytes.fromhex(out["scriptpubkey"]),
+                                tx["status"]["block_height"],
+                            )
+                        )
+
+        for tx in txs:
+            for inp in tx["vin"]:
+                for out in unspent:
+                    if inp["txid"] == bytes_to_txid(out.outpoint.hash):
+                        unspent.remove(out)
+                        break
+
+        self.coins = unspent
 
     @property
     def address(self):
@@ -172,8 +227,17 @@ def to_outpoint(txid: str, n: int) -> COutPoint:
     return COutPoint(txid_to_bytes(txid), n)
 
 
-def scan_utxos(rpc, addr):
-    return
+def marshal_tx(tx: CTransaction) -> bytes:
+    f = io.BytesIO()
+    tx.stream_serialize(f, True)
+    raw = f.getvalue()
+    return raw
+
+
+def unmarshal_tx(b: bytes) -> CMutableTransaction:
+    f = io.BytesIO(b)
+    tx = CTransaction.stream_deserialize(f)
+    return CMutableTransaction.from_tx(tx)
 
 
 def make_color(start, end):

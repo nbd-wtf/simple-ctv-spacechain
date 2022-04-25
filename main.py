@@ -1,6 +1,5 @@
 import sys
 import pprint
-import shelve
 import random
 
 from bitcoin.core import (
@@ -27,7 +26,7 @@ wallet = None
 
 
 def main():
-    with shelve.open("spacechain.db") as db:
+    with s() as db:
         db["seed"] = db.get("seed") or str(random.random()).encode("utf-8")
         db["txs"] = db.get("txs") or {}
 
@@ -36,40 +35,50 @@ def main():
             db["size"] = CHAIN_MAX
             db["txs"] = {}
 
+        global wallet
         wallet = Wallet.generate(db["seed"])
 
-    private_key = bold(white(shorten(wallet.privkey.hex())))
-    print(yellow(f"> loaded wallet with private key {private_key}"))
+    generate_transactions_flow()
+    get_money_flow()
 
-    print(yellow(f"> generating transactions for spacechain..."))
-    txs = [get_tx(i) for i in range(CHAIN_MAX + 1)]
-    for i in range(len(txs)):
-        tx = txs[i]
-        ctv_hash = cyan(get_standard_template_hash(tx, 0).hex())
-        print(f"- [{i}] ctv hash: {ctv_hash}")
+    genesis = get_tx(0)
+    if not genesis.id:
+        # we don't know about the spacechain genesis block, so let's create one
+        bootstrap_flow()
 
-    print(yellow(f"> scanning user wallet"))
-    wallet.scan()
-    print(f"UTXOs: {len(wallet.coins)}")
-    for utxo in wallet.coins:
-        print(f"- {utxo.satoshis} satoshis")
+    find_spacechain_position_flow()
 
-    while wallet.max_sendable < SATS_AMOUNT + 1000:
-        print(
-            yellow(
-                f"> fund your wallet by sending money to {white(bold(wallet.address))}"
-            )
-        )
-        input("  (press Enter when you're done)")
 
+def find_spacechain_position_flow():
+    print()
+    print(yellow(f"searching for the spacechain tip..."))
+    for i in range(CHAIN_MAX):
+        with s() as db:
+            txid = db["txs"][i].id
+            if not txid:
+                print(f"  - transaction {i} not mined yet, mine it?")
+                return i
+
+            tx = ctvsignet(f"/tx/{txid}")
+            print(tx)
+
+            print(f"  - transaction {i} mined as {bold(white(txid))}")
+            r = requests.get(f"https://explorer.ctvsignet.com/api/tx/{txid}/outspends")
+            r.raise_for_status()
+
+    return CHAIN_MAX
+
+
+def bootstrap_flow():
+    print()
     print(
         yellow(
-            f"> let's try to bootstrap the spacechain by its first covenant transaction."
+            f"> let's bootstrap the spacechain sending its first covenant transaction."
         )
     )
     first = get_tx(0)
     target_script = cyan(
-        get_standard_template_hash(first, 0).hex() + " OP_CHECKTEMPLATEVERIFY"
+        get_standard_template_hash(first.template, 0).hex() + " OP_CHECKTEMPLATEVERIFY"
     )
     print(
         yellow(f"> we'll do that by creating an output that spends to {target_script}")
@@ -85,7 +94,7 @@ def main():
             CScript(
                 # bare CTV (make bare scripts great again)
                 [
-                    get_standard_template_hash(first, 0),  # CTV hash
+                    get_standard_template_hash(first.template, 0),  # CTV hash
                     OP_CHECKTEMPLATEVERIFY,
                 ]
             ),
@@ -93,21 +102,57 @@ def main():
         # change
         CTxOut(
             coin.satoshis - SATS_AMOUNT - 800,
-            CScript([0, sha256(coin.scriptPubKey)]),
+            CScript([0, wallet.privkey.point.hash160()]),
         ),
     ]
     tx = coin.sign(bootstrap, 0)
-    print(f"  {white(tx.serialize().hex())}")
-    input()
+    print(f"{white(tx.serialize().hex())}")
+    input(f"  (press Enter to publish)")
+    txid = ctvsignet("/tx", tx.serialize().hex())
+    print(yellow(f"> published {bold(white(txid))}."))
+    with s() as db:
+        db["txs"][0].id = txid
 
 
-def get_tx(i):
-    with shelve.open("spacechain.db") as db:
+def get_money_flow():
+    global wallet
+    private_key = bold(white(shorten(wallet.privkey.hex())))
+    print(yellow(f"> loaded wallet with private key {private_key}"))
+
+    while True:
+        print(yellow(f"> scanning user wallet {magenta(bold(wallet.address))}"))
+        wallet.scan()
+        print(f"  UTXOs: {len(wallet.coins)}")
+        for utxo in wallet.coins:
+            print(f"  - {utxo.satoshis} satoshis")
+
+        if wallet.max_sendable > SATS_AMOUNT + 1000:
+            break
+
+        print(
+            yellow(
+                f"> fund your wallet by sending money to {white(bold(wallet.address))}"
+            )
+        )
+        input("  (press Enter when you're done)")
+
+
+def generate_transactions_flow():
+    print(yellow(f"> generating transactions for spacechain..."))
+    templates = [get_tx(i).template for i in range(CHAIN_MAX + 1)]
+    for i in range(len(templates)):
+        tmpl = templates[i]
+        ctv_hash = cyan(get_standard_template_hash(tmpl, 0).hex())
+        print(f"  - [{i}] ctv hash: {ctv_hash}")
+
+
+def get_tx(i) -> SpacechainTx:
+    with s() as db:
         if i in db["txs"]:
             return db["txs"][i]
 
     # the last tx in the chain is always the same
-    if i == CHAIN_MAX:
+    if i == CHAIN_MAX + 1:
         last = CMutableTransaction()
         last.nVersion = 2
         last.vin = [CTxIn()]  # CTV works with blank inputs
@@ -119,40 +164,37 @@ def get_tx(i):
             )
         ]
 
-        with shelve.open("spacechain.db") as db:
-            db["txs"][i] = last
-
-        return last
-
-    # recursion: we need the next one to calculate its CTV hash and commit here
-    next = get_tx(i + 1)
-    redeem_script = CScript(
-        [
-            get_standard_template_hash(next, 0),  # CTV hash
-            OP_CHECKTEMPLATEVERIFY,
+        with s() as db:
+            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(last), id=None)
+    else:
+        # recursion: we need the next one to calculate its CTV hash and commit here
+        next = get_tx(i + 1).template
+        tx = CMutableTransaction()
+        tx.nVersion = 2
+        tx.vin = [
+            # CTV works with blank inputs, we will fill in later
+            # one for the previous tx in the chain, the other for fee-bidding
+            CTxIn(),
+            CTxIn(),
         ]
-    )
-    tx = CMutableTransaction()
-    tx.nVersion = 2
-    tx.vin = [
-        # CTV works with blank inputs, we will fill in later
-        # one for the previous tx in the chain, the other for fee-bidding
-        CTxIn(),
-        CTxIn(),
-    ]
-    tx.vout = [
-        # this output continues the transaction chain
-        CTxOut(
-            SATS_AMOUNT,
-            # standard p2wsh output:
-            CScript([script.OP_0, sha256(redeem_script)]),
-        ),
-    ]
+        tx.vout = [
+            # this output continues the transaction chain
+            CTxOut(
+                SATS_AMOUNT,
+                # bare CTV
+                CScript(
+                    [
+                        get_standard_template_hash(next, 0),  # CTV hash
+                        OP_CHECKTEMPLATEVERIFY,
+                    ]
+                ),
+            ),
+        ]
 
-    with shelve.open("spacechain.db") as db:
-        db["txs"][i] = tx
+        with s() as db:
+            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(tx), id=None)
 
-    return tx
+    return get_tx(i)
 
 
 if __name__ == "__main__":

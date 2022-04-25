@@ -1,0 +1,3 @@
+python-bitcoinlib
+git+https://github.com/buidl-bitcoin/buidl-python
+requests
