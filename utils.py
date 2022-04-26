@@ -3,7 +3,6 @@ import json
 import struct
 import shelve
 import hashlib
-import requests
 from typing import List, Optional
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -20,29 +19,13 @@ from bitcoin.core import (
 from bitcoin.core.script import CScript, OPCODE_NAMES
 from bitcoin.wallet import CBech32BitcoinAddress
 from buidl.hd import HDPrivateKey, PrivateKey
+from rpc import BitcoinRPC, JSONRPCError
+
+rpc = BitcoinRPC(net_name="signet")
 
 
 def log(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
-
-
-def ctvsignet(path: str, body: str = None):
-    if body:
-        r = requests.post(
-            f"https://explorer.ctvsignet.com/api/v1" + path,
-            data=body,
-            headers={"content-type": "text/plain"},
-        )
-    else:
-        r = requests.get(f"https://explorer.ctvsignet.com/api/v1" + path)
-
-    if not r.ok:
-        raise requests.exceptions.HTTPError(r.text)
-
-    try:
-        return json.loads(r.text)
-    except json.decoder.JSONDecodeError:
-        return r.text
 
 
 @contextmanager
@@ -58,6 +41,7 @@ def s():
 class SpacechainTx:
     tmpl_bytes: Optional[bytes]
     id: Optional[str]
+    spacechain_block_hash: Optional[bytes]
 
     @property
     def template(self):
@@ -78,31 +62,17 @@ class Wallet:
         )
 
     def scan(self):
-        self.coins = []
-        txs = ctvsignet(f"/address/{self.address}/txs")
-        unspent = []
-        for tx in txs:
-            if tx["status"]["confirmed"]:
-                for i, out in enumerate(tx["vout"]):
-                    if out["scriptpubkey_address"] == self.address:
-                        unspent.append(
-                            Coin(
-                                self,
-                                COutPoint(txid_to_bytes(tx["txid"]), i),
-                                int(out["value"]),
-                                bytes.fromhex(out["scriptpubkey"]),
-                                tx["status"]["block_height"],
-                            )
-                        )
-
-        for tx in txs:
-            for inp in tx["vin"]:
-                for out in unspent:
-                    if inp["txid"] == bytes_to_txid(out.outpoint.hash):
-                        unspent.remove(out)
-                        break
-
-        self.coins = unspent
+        res = rpc.scantxoutset("start", [f"addr({self.address})"])
+        for utxo in res["unspents"]:
+            self.coins.append(
+                Coin(
+                    self,
+                    COutPoint(txid_to_bytes(utxo["txid"]), utxo["vout"]),
+                    int(utxo["amount"] * COIN),
+                    bytes.fromhex(utxo["scriptPubKey"]),
+                    utxo["height"],
+                )
+            )
 
     @property
     def address(self):

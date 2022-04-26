@@ -46,25 +46,107 @@ def main():
         # we don't know about the spacechain genesis block, so let's create one
         bootstrap_flow()
 
-    find_spacechain_position_flow()
+    pos = find_spacechain_position_flow()
+    mine_next_block_flow(pos)
+
+
+def mine_next_block_flow(
+    next_pos,
+    fee_bid=800,
+    spacechain_block_hash=b"spacechainblockhashgoeshere",
+):
+    curr_txid = get_tx(next_pos - 1).id
+    next_template = get_tx(next_pos).template
+
+    # our transaction
+    min_relay_fee = 500
+    coin = wallet.biggest_coin
+    our = CMutableTransaction()
+    our.nVersion = 2
+    our.vin = [CTxIn(coin.outpoint)]
+    our.vout = [
+        # to spacechain
+        CTxOut(
+            fee_bid,
+            CScript(
+                # normal p2wsh to our same address always
+                CScript([0, wallet.privkey.point.hash160()]),
+            ),
+        ),
+        # change
+        CTxOut(
+            coin.satoshis - fee_bid - min_relay_fee,
+            CScript([0, wallet.privkey.point.hash160()]),
+        ),
+        # op_return
+        CTxOut(0, CScript([script.OP_RETURN, spacechain_block_hash])),
+    ]
+    our_tx = coin.sign(our, 0)
+
+    # spacechain covenant transaction
+    spc = CMutableTransaction.from_tx(next_template)
+    spc.vin = [
+        # from the previous spacechain transaction
+        CTxIn(COutPoint(txid_to_bytes(curr_txid), 0)),
+        # from our funding transaction using our own pubkey
+        CTxIn(COutPoint(our_tx.GetTxid(), 0)),
+    ]
+    print(our)
+    print(spc)
+    spc_tx = coin.sign(spc, 1)
+    print(our_tx)
+    print(spc_tx)
+
+    print(
+        yellow(
+            f"Our transaction that will fund the spacechain one (plus OP_RETURN with spacechain block hash and change):"
+        )
+    )
+    print(f"{white(our_tx.serialize().hex())}")
+
+    print(yellow(f"The actual spacechain covenant transaction:"))
+    print(f"{white(spc_tx.serialize().hex())}")
+
+    input(f"  (press Enter to publish)")
+
+    our_txid = rpc.sendrawtransaction(our_tx.serialize().hex())
+    print(yellow(f"> published {bold(white(our_txid))}."))
+
+    spc_txid = rpc.sendrawtransaction(spc_tx.serialize().hex())
+    print(yellow(f"> published {bold(white(spc_txid))}."))
+
+    with s() as db:
+        db["txs"][next_pos].id = spc_txid
+        db["txs"][next_pos].spacechain_block_hash = spacechain_block_hash
 
 
 def find_spacechain_position_flow():
     print()
     print(yellow(f"searching for the spacechain tip..."))
-    for i in range(CHAIN_MAX):
-        with s() as db:
+    with s() as db:
+        for i in range(CHAIN_MAX):
             txid = db["txs"][i].id
-            if not txid:
-                print(f"  - transaction {i} not mined yet, mine it?")
+            if txid:
+                print(f"  - transaction {i} mined as {bold(white(txid))}")
+                continue
+
+            # txid for this index not found, check if the previous is spent
+            parent_is_unspent = rpc.gettxout(db["txs"][i - 1].id, 0)
+            if parent_is_unspent:
+                print(f"  - transaction {i} not mined yet")
                 return i
 
-            tx = ctvsignet(f"/tx/{txid}")
-            print(tx)
-
-            print(f"  - transaction {i} mined as {bold(white(txid))}")
-            r = requests.get(f"https://explorer.ctvsignet.com/api/tx/{txid}/outspends")
-            r.raise_for_status()
+            # the parent is spent, which means this has been published
+            # but we don't know under which txid, so we'll scan the utxo set
+            redeem_script = CScript(
+                [
+                    get_standard_template_hash(db["txs"][i].template, 0),
+                    OP_CHECKTEMPLATEVERIFY,
+                ]
+            )
+            res = rpc.scantxoutset("start", [f"raw({redeem_script.hex()})"])
+            for utxo in res["unspents"]:
+                print(utxo)  # TODO
 
     return CHAIN_MAX
 
@@ -108,7 +190,7 @@ def bootstrap_flow():
     tx = coin.sign(bootstrap, 0)
     print(f"{white(tx.serialize().hex())}")
     input(f"  (press Enter to publish)")
-    txid = ctvsignet("/tx", tx.serialize().hex())
+    txid = rpc.sendrawtransaction(tx.serialize().hex())
     print(yellow(f"> published {bold(white(txid))}."))
     with s() as db:
         db["txs"][0].id = txid
@@ -120,9 +202,13 @@ def get_money_flow():
     print(yellow(f"> loaded wallet with private key {private_key}"))
 
     while True:
-        print(yellow(f"> scanning user wallet {magenta(bold(wallet.address))}"))
+        print(
+            yellow(
+                f"> scanning user wallet (fixed address) {magenta(bold(wallet.address))}..."
+            )
+        )
         wallet.scan()
-        print(f"  UTXOs: {len(wallet.coins)}")
+        print(f"  UTXOs found: {len(wallet.coins)}")
         for utxo in wallet.coins:
             print(f"  - {utxo.satoshis} satoshis")
 
@@ -138,7 +224,7 @@ def get_money_flow():
 
 
 def generate_transactions_flow():
-    print(yellow(f"> generating transactions for spacechain..."))
+    print(yellow(f"> pregenerating transactions for spacechain covenant string..."))
     templates = [get_tx(i).template for i in range(CHAIN_MAX + 1)]
     for i in range(len(templates)):
         tmpl = templates[i]
