@@ -41,70 +41,63 @@ def main():
     generate_transactions_flow()
     get_money_flow()
 
-    genesis = get_tx(0)
-    if not genesis.id:
-        # we don't know about the spacechain genesis block, so let's create one
-        bootstrap_flow()
-
     pos = find_spacechain_position_flow()
     mine_next_block_flow(pos)
 
 
 def mine_next_block_flow(
     next_pos,
-    fee_bid=800,
+    fee_bid=3000,
     spacechain_block_hash=b"spacechainblockhashgoeshere",
 ):
-    curr_txid = get_tx(next_pos - 1).id
-    next_template = get_tx(next_pos).template
-
     # our transaction
     min_relay_fee = 500
     coin = wallet.biggest_coin
     our = CMutableTransaction()
     our.nVersion = 2
-    our.vin = [CTxIn(coin.outpoint)]
+    our.vin = [CTxIn(coin.outpoint, nSequence=0)]
     our.vout = [
         # to spacechain
         CTxOut(
             fee_bid,
             CScript(
-                # normal p2wsh to our same address always
+                # normal p2wpkh to our same address always
                 CScript([0, wallet.privkey.point.hash160()]),
             ),
         ),
+        # op_return
+        CTxOut(0, CScript([script.OP_RETURN, spacechain_block_hash])),
         # change
         CTxOut(
             coin.satoshis - fee_bid - min_relay_fee,
             CScript([0, wallet.privkey.point.hash160()]),
         ),
-        # op_return
-        CTxOut(0, CScript([script.OP_RETURN, spacechain_block_hash])),
     ]
-    our_tx = coin.sign(our, 0)
+    our_tx = wallet.sign(our, 0, coin.satoshis)
 
-    # spacechain covenant transaction
-    spc = CMutableTransaction.from_tx(next_template)
-    spc.vin = [
+    # spacechain transaction
+    spc = CMutableTransaction.from_tx(get_tx(next_pos).template)
+    spc.vin = []
+    if next_pos > 0:
         # from the previous spacechain transaction
-        CTxIn(COutPoint(txid_to_bytes(curr_txid), 0)),
+        curr_txid = get_tx(next_pos - 1).id
+        spc.vin.append(
+            CTxIn(COutPoint(txid_to_bytes(curr_txid), 0), nSequence=0),
+        )
+    spc.vin.append(
         # from our funding transaction using our own pubkey
-        CTxIn(COutPoint(our_tx.GetTxid(), 0)),
-    ]
-    print(our)
-    print(spc)
-    spc_tx = coin.sign(spc, 1)
-    print(our_tx)
-    print(spc_tx)
+        CTxIn(COutPoint(our_tx.GetTxid(), 0), nSequence=0),
+    )
+    spc_tx = wallet.sign(spc, len(spc.vin) - 1, fee_bid)
 
     print(
-        yellow(
-            f"Our transaction that will fund the spacechain one (plus OP_RETURN with spacechain block hash and change):"
+        cyan(
+            f"    - our transaction that will fund the spacechain one (plus OP_RETURN with spacechain block hash and change):"
         )
     )
     print(f"{white(our_tx.serialize().hex())}")
 
-    print(yellow(f"The actual spacechain covenant transaction:"))
+    print(cyan(f"    - the actual spacechain covenant transaction:"))
     print(f"{white(spc_tx.serialize().hex())}")
 
     input(f"  (press Enter to publish)")
@@ -122,13 +115,22 @@ def mine_next_block_flow(
 
 def find_spacechain_position_flow():
     print()
-    print(yellow(f"searching for the spacechain tip..."))
+    print(yellow(f"> searching for the spacechain tip..."))
     with s() as db:
         for i in range(CHAIN_MAX):
             txid = db["txs"][i].id
             if txid:
                 print(f"  - transaction {i} mined as {bold(white(txid))}")
                 continue
+
+            if i == 0:
+                # this is the genesis, so we just assume we're starting a new spacechain
+                print(
+                    yellow(
+                        f"> this spacechain has not been bootstrapped yet (at least we don't know about it), so let's start it off"
+                    )
+                )
+                return 0
 
             # txid for this index not found, check if the previous is spent
             parent_is_unspent = rpc.gettxout(db["txs"][i - 1].id, 0)
@@ -149,51 +151,6 @@ def find_spacechain_position_flow():
                 print(utxo)  # TODO
 
     return CHAIN_MAX
-
-
-def bootstrap_flow():
-    print()
-    print(
-        yellow(
-            f"> let's bootstrap the spacechain sending its first covenant transaction."
-        )
-    )
-    first = get_tx(0)
-    target_script = cyan(
-        get_standard_template_hash(first.template, 0).hex() + " OP_CHECKTEMPLATEVERIFY"
-    )
-    print(
-        yellow(f"> we'll do that by creating an output that spends to {target_script}")
-    )
-    coin = wallet.biggest_coin
-    bootstrap = CMutableTransaction()
-    bootstrap.nVersion = 2
-    bootstrap.vin = [CTxIn(coin.outpoint)]
-    bootstrap.vout = [
-        # to spacechain
-        CTxOut(
-            SATS_AMOUNT,
-            CScript(
-                # bare CTV (make bare scripts great again)
-                [
-                    get_standard_template_hash(first.template, 0),  # CTV hash
-                    OP_CHECKTEMPLATEVERIFY,
-                ]
-            ),
-        ),
-        # change
-        CTxOut(
-            coin.satoshis - SATS_AMOUNT - 800,
-            CScript([0, wallet.privkey.point.hash160()]),
-        ),
-    ]
-    tx = coin.sign(bootstrap, 0)
-    print(f"{white(tx.serialize().hex())}")
-    input(f"  (press Enter to publish)")
-    txid = rpc.sendrawtransaction(tx.serialize().hex())
-    print(yellow(f"> published {bold(white(txid))}."))
-    with s() as db:
-        db["txs"][0].id = txid
 
 
 def get_money_flow():
@@ -251,10 +208,11 @@ def get_tx(i) -> SpacechainTx:
         ]
 
         with s() as db:
-            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(last), id=None)
+            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(last))
     else:
         # recursion: we need the next one to calculate its CTV hash and commit here
         next = get_tx(i + 1).template
+
         tx = CMutableTransaction()
         tx.nVersion = 2
         tx.vin = [
@@ -263,6 +221,11 @@ def get_tx(i) -> SpacechainTx:
             CTxIn(),
             CTxIn(),
         ]
+
+        # the genesis tx will only have one input, the one we will use to fund it
+        if i == 0:
+            tx.vin = [CTxIn()]
+
         tx.vout = [
             # this output continues the transaction chain
             CTxOut(
@@ -277,8 +240,10 @@ def get_tx(i) -> SpacechainTx:
             ),
         ]
 
+        print(tx.serialize().hex())
+
         with s() as db:
-            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(tx), id=None)
+            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(tx))
 
     return get_tx(i)
 

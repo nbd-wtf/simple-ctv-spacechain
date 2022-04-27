@@ -40,8 +40,8 @@ def s():
 @dataclass
 class SpacechainTx:
     tmpl_bytes: Optional[bytes]
-    id: Optional[str]
-    spacechain_block_hash: Optional[bytes]
+    id: Optional[str] = None
+    spacechain_block_hash: Optional[bytes] = None
 
     @property
     def template(self):
@@ -66,10 +66,8 @@ class Wallet:
         for utxo in res["unspents"]:
             self.coins.append(
                 Coin(
-                    self,
                     COutPoint(txid_to_bytes(utxo["txid"]), utxo["vout"]),
                     int(utxo["amount"] * COIN),
-                    bytes.fromhex(utxo["scriptPubKey"]),
                     utxo["height"],
                 )
             )
@@ -92,45 +90,51 @@ class Wallet:
 
         raise ValueError("no coins!")
 
-
-@dataclass(frozen=True)
-class Coin:
-    wallet: Wallet
-    outpoint: COutPoint
-    satoshis: int
-    scriptPubKey: bytes
-    height: int
-
-    def sign(self, tx: CMutableTransaction, input_index: int):
-        spend_from_addr = CBech32BitcoinAddress.from_scriptPubKey(
-            CScript(self.scriptPubKey)
-        )
-
-        # standard p2wpkh redeemScript
-        redeem_script = CScript(
-            [
-                script.OP_DUP,
-                script.OP_HASH160,
-                spend_from_addr,
-                script.OP_EQUALVERIFY,
-                script.OP_CHECKSIG,
-            ]
-        )
+    def sign(self, tx: CMutableTransaction, input_index: int, satoshis: int):
+        pubkey160 = self.privkey.point.hash160()
 
         sighash = script.SignatureHash(
-            redeem_script,
+            # this is how the p2wpkh redeem script looks for sighashes
+            CScript(
+                [
+                    script.OP_DUP,
+                    script.OP_HASH160,
+                    pubkey160,
+                    script.OP_EQUALVERIFY,
+                    script.OP_CHECKSIG,
+                ]
+            ),
             tx,
             input_index,
             script.SIGHASH_ALL,
-            amount=self.satoshis,
+            amount=satoshis,
             sigversion=script.SIGVERSION_WITNESS_V0,
         )
-        sig = self.wallet.privkey.sign(int.from_bytes(sighash, "big")).der() + bytes(
+
+        sig = self.privkey.sign(int.from_bytes(sighash, "big")).der() + bytes(
             [script.SIGHASH_ALL]
         )
-        wit = [CTxInWitness(CScriptWitness([sig, self.wallet.privkey.point.sec()]))]
-        tx.wit = CTxWitness(wit)
+        tx.wit = CTxWitness(
+            [
+                CTxInWitness(
+                    CScriptWitness(
+                        [
+                            sig,
+                            self.privkey.point.sec(),
+                        ],
+                    ),
+                ),
+            ]
+        )
+
         return CTransaction.from_tx(tx)
+
+
+@dataclass(frozen=True)
+class Coin:
+    outpoint: COutPoint
+    satoshis: int
+    height: int
 
 
 def sha256(s) -> bytes:
@@ -163,7 +167,6 @@ def get_standard_template_hash(tx: CTransaction, nIn: int) -> bytes:
     for i in range(len(vin)):
         inp = vin[i]
         if inp.scriptSig and inp.scriptSig.is_p2sh():
-            print(i, inp.scriptSig.is_p2sh())
             r += sha256(ser_string(inp.scriptSig))
     r += struct.pack("<I", len(tx.vin))
     r += sha256(b"".join(struct.pack("<I", inp.nSequence) for inp in vin))
