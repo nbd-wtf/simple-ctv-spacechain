@@ -48,6 +48,9 @@ class SpacechainTx:
         if self.tmpl_bytes:
             return unmarshal_tx(self.tmpl_bytes)
 
+    def ctv_hash(self, input_index=0):
+        return get_standard_template_hash(self.template, input_index)
+
 
 @dataclass
 class Wallet:

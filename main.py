@@ -19,7 +19,7 @@ from bitcoin.core import script
 from utils import *
 
 OP_CHECKTEMPLATEVERIFY = script.OP_NOP4
-CHAIN_MAX = 4
+CHAIN_MAX = 2
 SATS_AMOUNT = 1000
 
 wallet = None
@@ -47,7 +47,7 @@ def main():
 
 def mine_next_block_flow(
     next_pos,
-    fee_bid=3000,
+    fee_bid=5000,
     spacechain_block_hash=b"spacechainblockhashgoeshere",
 ):
     # our transaction
@@ -80,15 +80,19 @@ def mine_next_block_flow(
     spc.vin = []
     if next_pos > 0:
         # from the previous spacechain transaction
-        curr_txid = get_tx(next_pos - 1).id
         spc.vin.append(
-            CTxIn(COutPoint(txid_to_bytes(curr_txid), 0), nSequence=0),
+            CTxIn(
+                COutPoint(txid_to_bytes(get_tx(next_pos - 1).id), 0),
+                nSequence=0,
+            ),
         )
-    spc.vin.append(
-        # from our funding transaction using our own pubkey
-        CTxIn(COutPoint(our_tx.GetTxid(), 0), nSequence=0),
-    )
-    spc_tx = wallet.sign(spc, len(spc.vin) - 1, fee_bid)
+        spc_tx = spc
+    if next_pos == 0:
+        spc.vin.append(
+            # from our funding transaction using our own pubkey
+            CTxIn(COutPoint(our_tx.GetTxid(), 0), nSequence=0),
+        )
+        spc_tx = wallet.sign(spc, len(spc.vin) - 1, fee_bid)
 
     print(
         cyan(
@@ -97,7 +101,11 @@ def mine_next_block_flow(
     )
     print(f"{white(our_tx.serialize().hex())}")
 
-    print(cyan(f"    - the actual spacechain covenant transaction:"))
+    print(
+        cyan(
+            f"    - the actual spacechain covenant transaction (index {next_pos}) with CTV hash equal to {magenta(get_tx(next_pos).ctv_hash().hex())}:"
+        )
+    )
     print(f"{white(spc_tx.serialize().hex())}")
 
     input(f"  (press Enter to publish)")
@@ -117,7 +125,7 @@ def find_spacechain_position_flow():
     print()
     print(yellow(f"> searching for the spacechain tip..."))
     with s() as db:
-        for i in range(CHAIN_MAX):
+        for i in range(CHAIN_MAX + 1):
             txid = db["txs"][i].id
             if txid:
                 print(f"  - transaction {i} mined as {bold(white(txid))}")
@@ -142,7 +150,7 @@ def find_spacechain_position_flow():
             # but we don't know under which txid, so we'll scan the utxo set
             redeem_script = CScript(
                 [
-                    get_standard_template_hash(db["txs"][i].template, 0),
+                    db["txs"][i].ctv_hash(),
                     OP_CHECKTEMPLATEVERIFY,
                 ]
             )
@@ -150,7 +158,7 @@ def find_spacechain_position_flow():
             for utxo in res["unspents"]:
                 print(utxo)  # TODO
 
-    return CHAIN_MAX
+    return CHAIN_MAX + 1
 
 
 def get_money_flow():
@@ -182,11 +190,12 @@ def get_money_flow():
 
 def generate_transactions_flow():
     print(yellow(f"> pregenerating transactions for spacechain covenant string..."))
-    templates = [get_tx(i).template for i in range(CHAIN_MAX + 1)]
-    for i in range(len(templates)):
-        tmpl = templates[i]
-        ctv_hash = cyan(get_standard_template_hash(tmpl, 0).hex())
-        print(f"  - [{i}] ctv hash: {ctv_hash}")
+    txs = (get_tx(i) for i in range(CHAIN_MAX + 1))
+    for i, tx in enumerate(txs):
+        ctv_hash = cyan(tx.ctv_hash().hex())
+        amount = green(f"{tx.template.vout[0].nValue} sats")
+        print(f"  - [{yellow(i)}] {amount}\n    ctv hash: {ctv_hash}")
+        print(f"    {tx.template.serialize().hex()}")
 
 
 def get_tx(i) -> SpacechainTx:
@@ -198,7 +207,7 @@ def get_tx(i) -> SpacechainTx:
     if i == CHAIN_MAX + 1:
         last = CMutableTransaction()
         last.nVersion = 2
-        last.vin = [CTxIn()]  # CTV works with blank inputs
+        last.vin = [CTxIn(nSequence=0)]  # CTV works with blank inputs
         last.vout = [
             CTxOut(
                 0,
@@ -211,15 +220,15 @@ def get_tx(i) -> SpacechainTx:
             db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(last))
     else:
         # recursion: we need the next one to calculate its CTV hash and commit here
-        next = get_tx(i + 1).template
+        next = get_tx(i + 1)
 
         tx = CMutableTransaction()
         tx.nVersion = 2
         tx.vin = [
             # CTV works with blank inputs, we will fill in later
             # one for the previous tx in the chain, the other for fee-bidding
-            CTxIn(),
-            CTxIn(),
+            CTxIn(nSequence=0),
+            # CTxIn(nSequence=0),
         ]
 
         # the genesis tx will only have one input, the one we will use to fund it
@@ -229,18 +238,16 @@ def get_tx(i) -> SpacechainTx:
         tx.vout = [
             # this output continues the transaction chain
             CTxOut(
-                SATS_AMOUNT,
+                SATS_AMOUNT * (CHAIN_MAX - i + 1) - i * 200,
                 # bare CTV
                 CScript(
                     [
-                        get_standard_template_hash(next, 0),  # CTV hash
+                        next.ctv_hash(),  # CTV hash
                         OP_CHECKTEMPLATEVERIFY,
                     ]
                 ),
             ),
         ]
-
-        print(tx.serialize().hex())
 
         with s() as db:
             db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(tx))
