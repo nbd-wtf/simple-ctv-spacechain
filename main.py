@@ -16,7 +16,7 @@ from test_framework.messages import (
 from test_framework.script import CScript
 from utils import *
 
-CHAIN_MAX = 6
+CHAIN_MAX = 7
 SATS_AMOUNT = 1000
 
 wallet = None
@@ -46,6 +46,8 @@ def main():
 
     while True:
         pos = mine_next_block_flow(pos)
+
+        find_spacechain_position_flow()
 
         if pos > CHAIN_MAX:
             break
