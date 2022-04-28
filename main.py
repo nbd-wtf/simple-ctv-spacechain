@@ -19,7 +19,7 @@ from bitcoin.core import script
 from utils import *
 
 OP_CHECKTEMPLATEVERIFY = script.OP_NOP4
-CHAIN_MAX = 2
+CHAIN_MAX = 4
 SATS_AMOUNT = 1000
 
 wallet = None
@@ -47,11 +47,11 @@ def main():
 
 def mine_next_block_flow(
     next_pos,
-    fee_bid=5000,
+    fee_bid=4000,
     spacechain_block_hash=b"spacechainblockhashgoeshere",
 ):
     # our transaction
-    min_relay_fee = 500
+    min_relay_fee = 300
     coin = wallet.biggest_coin
     our = CMutableTransaction()
     our.nVersion = 2
@@ -87,12 +87,12 @@ def mine_next_block_flow(
             ),
         )
         spc_tx = spc
-    if next_pos == 0:
-        spc.vin.append(
-            # from our funding transaction using our own pubkey
-            CTxIn(COutPoint(our_tx.GetTxid(), 0), nSequence=0),
-        )
-        spc_tx = wallet.sign(spc, len(spc.vin) - 1, fee_bid)
+
+    spc.vin.append(
+        # from our funding transaction using our own pubkey
+        CTxIn(COutPoint(our_tx.GetTxid(), 0), nSequence=0),
+    )
+    spc_tx = wallet.sign(spc, len(spc.vin) - 1, fee_bid)
 
     print(
         cyan(
@@ -117,46 +117,47 @@ def mine_next_block_flow(
     print(yellow(f"> published {bold(white(spc_txid))}."))
 
     with s() as db:
+        print("saving", spc_txid, "to", next_pos)
         db["txs"][next_pos].id = spc_txid
+        print("here", db["txs"][next_pos].id)
         db["txs"][next_pos].spacechain_block_hash = spacechain_block_hash
 
 
 def find_spacechain_position_flow():
     print()
     print(yellow(f"> searching for the spacechain tip..."))
-    with s() as db:
-        for i in range(CHAIN_MAX + 1):
-            txid = db["txs"][i].id
-            if txid:
-                print(f"  - transaction {i} mined as {bold(white(txid))}")
-                continue
+    for i in range(CHAIN_MAX + 1):
+        txid = get_tx(i).id
+        if txid:
+            print(f"  - transaction {i} mined as {bold(white(txid))}")
+            continue
 
-            if i == 0:
-                # this is the genesis, so we just assume we're starting a new spacechain
-                print(
-                    yellow(
-                        f"> this spacechain has not been bootstrapped yet (at least we don't know about it), so let's start it off"
-                    )
+        if i == 0:
+            # this is the genesis, so we just assume we're starting a new spacechain
+            print(
+                yellow(
+                    f"> this spacechain has not been bootstrapped yet (at least we don't know about it), so let's start it off"
                 )
-                return 0
-
-            # txid for this index not found, check if the previous is spent
-            parent_is_unspent = rpc.gettxout(db["txs"][i - 1].id, 0)
-            if parent_is_unspent:
-                print(f"  - transaction {i} not mined yet")
-                return i
-
-            # the parent is spent, which means this has been published
-            # but we don't know under which txid, so we'll scan the utxo set
-            redeem_script = CScript(
-                [
-                    db["txs"][i].ctv_hash(),
-                    OP_CHECKTEMPLATEVERIFY,
-                ]
             )
-            res = rpc.scantxoutset("start", [f"raw({redeem_script.hex()})"])
-            for utxo in res["unspents"]:
-                print(utxo)  # TODO
+            return 0
+
+        # txid for this index not found, check if the previous is spent
+        parent_is_unspent = rpc.gettxout(get_tx(i - 1).id, 0)
+        if parent_is_unspent:
+            print(f"  - transaction {i} not mined yet")
+            return i
+
+        # the parent is spent, which means this has been published
+        # but we don't know under which txid, so we'll scan the utxo set
+        redeem_script = CScript(
+            [
+                get_tx(i).ctv_hash(),
+                OP_CHECKTEMPLATEVERIFY,
+            ]
+        )
+        res = rpc.scantxoutset("start", [f"raw({redeem_script.hex()})"])
+        for utxo in res["unspents"]:
+            print(utxo)  # TODO
 
     return CHAIN_MAX + 1
 
@@ -199,6 +200,7 @@ def generate_transactions_flow():
 
 
 def get_tx(i) -> SpacechainTx:
+    id = None
     with s() as db:
         if i in db["txs"]:
             return db["txs"][i]
@@ -207,7 +209,11 @@ def get_tx(i) -> SpacechainTx:
     if i == CHAIN_MAX + 1:
         last = CMutableTransaction()
         last.nVersion = 2
-        last.vin = [CTxIn(nSequence=0)]  # CTV works with blank inputs
+        last.vin = [
+            # CTV works with blank inputs, we will fill in later
+            CTxIn(nSequence=0),
+            CTxIn(nSequence=0),
+        ]
         last.vout = [
             CTxOut(
                 0,
@@ -228,17 +234,17 @@ def get_tx(i) -> SpacechainTx:
             # CTV works with blank inputs, we will fill in later
             # one for the previous tx in the chain, the other for fee-bidding
             CTxIn(nSequence=0),
-            # CTxIn(nSequence=0),
+            CTxIn(nSequence=0),
         ]
 
         # the genesis tx will only have one input, the one we will use to fund it
         if i == 0:
-            tx.vin = [CTxIn()]
+            tx.vin = [CTxIn(nSequence=0)]
 
         tx.vout = [
             # this output continues the transaction chain
             CTxOut(
-                SATS_AMOUNT * (CHAIN_MAX - i + 1) - i * 200,
+                SATS_AMOUNT,
                 # bare CTV
                 CScript(
                     [
