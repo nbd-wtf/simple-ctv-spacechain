@@ -118,7 +118,8 @@ class Wallet:
             [script.SIGHASH_ALL]
         )
         tx.wit.vtxinwit.append(CTxInWitness())
-        tx.wit.vtxinwit[0].scriptWitness.stack = [
+        tx.wit.vtxinwit.append(CTxInWitness())
+        tx.wit.vtxinwit[1].scriptWitness.stack = [
             sig,
             self.privkey.point.sec(),
         ]
