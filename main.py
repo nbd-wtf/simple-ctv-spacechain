@@ -16,7 +16,7 @@ from test_framework.messages import (
 from test_framework.script import CScript
 from utils import *
 
-CHAIN_MAX = 10
+CHAIN_MAX = 6
 SATS_AMOUNT = 1000
 
 wallet = None
