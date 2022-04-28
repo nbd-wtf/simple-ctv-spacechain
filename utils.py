@@ -39,7 +39,6 @@ def s():
 class SpacechainTx:
     tmpl_bytes: Optional[bytes]
     id: Optional[str] = None
-    spacechain_block_hash: Optional[bytes] = None
 
     @property
     def template(self):
@@ -66,15 +65,37 @@ class Wallet:
         )
 
     def scan(self):
+        self.coins = []
+
         res = rpc.scantxoutset("start", [f"addr({self.address})"])
         for utxo in res["unspents"]:
             self.coins.append(
                 Coin(
                     COutPoint(int(utxo["txid"], 16), utxo["vout"]),
                     int(utxo["amount"] * COIN),
-                    utxo["height"],
                 )
             )
+
+        for txid in rpc.getrawmempool():
+            raw = rpc.getrawtransaction(txid, 2)
+            for out in raw["vout"]:
+                if out["scriptPubKey"].get("address") == self.address:
+                    self.coins.append(
+                        Coin(
+                            COutPoint(int(raw["txid"], 16), out["n"]),
+                            int(out["value"] * COIN),
+                        )
+                    )
+
+        for txid in rpc.getrawmempool():
+            raw = rpc.getrawtransaction(txid, 2)
+            for inp in raw["vin"]:
+                for coin in self.coins:
+                    if (
+                        int(inp["txid"], 16) == coin.outpoint.hash
+                        and inp["vout"] == coin.outpoint.n
+                    ):
+                        self.coins.remove(coin)
 
     @property
     def address(self):
@@ -133,7 +154,6 @@ class Wallet:
 class Coin:
     outpoint: COutPoint
     satoshis: int
-    height: int
 
 
 def format_cscript(script: CScript) -> str:

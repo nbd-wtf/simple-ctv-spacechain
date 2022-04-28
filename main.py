@@ -1,4 +1,5 @@
 import sys
+import time
 import pprint
 import random
 
@@ -15,7 +16,7 @@ from test_framework.messages import (
 from test_framework.script import CScript
 from utils import *
 
-CHAIN_MAX = 4
+CHAIN_MAX = 10
 SATS_AMOUNT = 1000
 
 wallet = None
@@ -38,14 +39,49 @@ def main():
     get_money_flow()
 
     pos = find_spacechain_position_flow()
-    mine_next_block_flow(pos)
+
+    if pos == -1:
+        print(yellow(f"> this spacechain has reached its end."))
+        return
+
+    while True:
+        pos = mine_next_block_flow(pos)
+
+        if pos > CHAIN_MAX:
+            break
+
+        get_money_flow()
 
 
-def mine_next_block_flow(
-    next_pos,
-    fee_bid=4000,
-    spacechain_block_hash=b"spacechainblockhashgoeshere",
-):
+def mine_next_block_flow(next_pos):
+    print()
+    print(yellow(f"> we're going to mine the spacechain block {next_pos}"))
+
+    fee_bid = 0
+    spacechain_block_hash = b""
+
+    while fee_bid == 0:
+        try:
+            fee_bid = int(
+                input(
+                    blue(
+                        bold(
+                            f"  ~ type the fee you want to bid (in satoshis, type 3000 if you're unsure): "
+                        )
+                    )
+                )
+            )
+        except ValueError:
+            pass
+
+    while spacechain_block_hash == b"":
+        try:
+            spacechain_block_hash = input(
+                blue(bold(f"  ~ type the block hash (anything, this is just a test): "))
+            ).encode("utf-8")
+        except ValueError:
+            pass
+
     # our transaction
     min_relay_fee = 300
     coin = wallet.biggest_coin
@@ -115,7 +151,14 @@ def mine_next_block_flow(
 
     with s() as db:
         db["txs"][next_pos].id = spc_txid
-        db["txs"][next_pos].spacechain_block_hash = spacechain_block_hash
+
+    print()
+    print(bold(green(f"CONGRATULATIONS! YOU'VE MINED A SPACECHAIN BLOCK!")))
+    print(bold(green(f"=================================================")))
+    print()
+    time.sleep(2)
+
+    return next_pos + 1
 
 
 def find_spacechain_position_flow():
@@ -124,7 +167,15 @@ def find_spacechain_position_flow():
     for i in range(CHAIN_MAX + 1):
         txid = get_tx(i).id
         if txid:
-            print(f"  - transaction {i} mined as {bold(white(txid))}")
+            parent_txid = rpc.getrawtransaction(txid, 2)["vin"][-1]["txid"]
+            spc_blockhash = bytes.fromhex(
+                rpc.getrawtransaction(parent_txid, 2)["vout"][1]["scriptPubKey"]["asm"][
+                    len("OP_RETURN ") :
+                ]
+            ).decode("utf-8")
+            print(f"  - transaction {bold(i)} mined as {bold(green(txid))}")
+            print(f"    with funding parent {bold(white(parent_txid))}")
+            print(f"    and spacechain block hash {bold(blue(spc_blockhash))}")
             continue
 
         if i == 0:
@@ -139,7 +190,7 @@ def find_spacechain_position_flow():
         # txid for this index not found, check if the previous is spent
         parent_is_unspent = rpc.gettxout(get_tx(i - 1).id, 0)
         if parent_is_unspent:
-            print(f"  - transaction {i} not mined yet")
+            print(f"  - transaction {bold(i)} not mined yet")
             return i
 
         # the parent is spent, which means this has been published
@@ -154,7 +205,7 @@ def find_spacechain_position_flow():
         for utxo in res["unspents"]:
             print(utxo)  # TODO
 
-    return CHAIN_MAX + 1
+    return -1
 
 
 def get_money_flow():
@@ -171,7 +222,8 @@ def get_money_flow():
         wallet.scan()
         print(f"  UTXOs found: {len(wallet.coins)}")
         for utxo in wallet.coins:
-            print(f"  - {utxo.satoshis} satoshis")
+            coin = italic(magenta("%064x:%i" % (utxo.outpoint.hash, utxo.outpoint.n)))
+            print(f"  - {utxo.satoshis} satoshis at {coin}")
 
         if wallet.max_sendable > SATS_AMOUNT + 1000:
             break
@@ -186,12 +238,11 @@ def get_money_flow():
 
 def generate_transactions_flow():
     print(yellow(f"> pregenerating transactions for spacechain covenant string..."))
-    txs = (get_tx(i) for i in range(CHAIN_MAX + 1))
+    txs = (get_tx(i) for i in range(CHAIN_MAX))
     for i, tx in enumerate(txs):
         ctv_hash = cyan(tx.ctv_hash().hex())
         amount = green(f"{tx.template.vout[0].nValue} sats")
         print(f"  - [{yellow(i)}] {amount}\n    ctv hash: {ctv_hash}")
-        print(f"    {tx.template.serialize().hex()}")
 
 
 def get_tx(i) -> SpacechainTx:
@@ -201,7 +252,7 @@ def get_tx(i) -> SpacechainTx:
             return db["txs"][i]
 
     # the last tx in the chain is always the same
-    if i == CHAIN_MAX + 1:
+    if i == CHAIN_MAX:
         last = CTransaction()
         last.nVersion = 2
         last.vin = [
