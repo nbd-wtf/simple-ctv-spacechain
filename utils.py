@@ -117,9 +117,11 @@ class Wallet:
         sig = self.privkey.sign(int.from_bytes(sighash, "big")).der() + bytes(
             [script.SIGHASH_ALL]
         )
-        tx.wit.vtxinwit.append(CTxInWitness())
-        tx.wit.vtxinwit.append(CTxInWitness())
-        tx.wit.vtxinwit[1].scriptWitness.stack = [
+
+        for _ in tx.vin:
+            tx.wit.vtxinwit.append(CTxInWitness())
+
+        tx.wit.vtxinwit[input_index].scriptWitness.stack = [
             sig,
             self.privkey.point.sec(),
         ]
