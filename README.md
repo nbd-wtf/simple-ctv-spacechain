@@ -1,8 +1,6 @@
 Simple CTV Spacechain
 =====================
 
-[![asciicast](https://asciinema.org/a/iRC5fXcuNmuvkbMoGMbeOuVA0.svg)](https://asciinema.org/a/iRC5fXcuNmuvkbMoGMbeOuVA0)
-
 This is a demo of a CTV-based [Spacechain](https://www.youtube.com/watch?v=N2ow4Q34Jeg).
 
 To run it you need
@@ -20,6 +18,12 @@ You can stop the program flow and continue later if you want.
 
 Please stop at each step to inspect the transactions that were generated and see how they fit beautifully with each other.
 
+If you have questions or you just love spacechains, please go to https://t.me/spacechains!
+
 ---
 
-If you have questions or you just love spacechains, please go to https://t.me/spacechains!
+Here's a recorded demo of a spacechain being mined until the end:
+
+[![asciicast](https://asciinema.org/a/iRC5fXcuNmuvkbMoGMbeOuVA0.svg)](https://asciinema.org/a/iRC5fXcuNmuvkbMoGMbeOuVA0)
+
+This is the last transaction of the spacechain mined in the demo above: you can inspect the other ones from here: https://explorer.ctvsignet.com/tx/77dd64329d27f5d36808a2511ea0311a54f8a283d3243ab58ada427e0ce7aeeb
