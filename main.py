@@ -2,23 +2,19 @@ import sys
 import pprint
 import random
 
-from bitcoin.core import (
-    CTransaction,
-    CMutableTransaction,
+from test_framework import script
+from test_framework.messages import (
+    COIN,
     CTxIn,
     CTxOut,
-    CScript,
-    CScriptOp,
     COutPoint,
     CTxWitness,
+    CTransaction,
     CTxInWitness,
-    CScriptWitness,
-    COIN,
 )
-from bitcoin.core import script
+from test_framework.script import CScript
 from utils import *
 
-OP_CHECKTEMPLATEVERIFY = script.OP_NOP4
 CHAIN_MAX = 4
 SATS_AMOUNT = 1000
 
@@ -53,7 +49,7 @@ def mine_next_block_flow(
     # our transaction
     min_relay_fee = 300
     coin = wallet.biggest_coin
-    our = CMutableTransaction()
+    our = CTransaction()
     our.nVersion = 2
     our.vin = [CTxIn(coin.outpoint, nSequence=0)]
     our.vout = [
@@ -74,15 +70,16 @@ def mine_next_block_flow(
         ),
     ]
     our_tx = wallet.sign(our, 0, coin.satoshis)
+    our_tx.rehash()
 
     # spacechain transaction
-    spc = CMutableTransaction.from_tx(get_tx(next_pos).template)
+    spc = CTransaction(get_tx(next_pos).template)
     spc.vin = []
     if next_pos > 0:
         # from the previous spacechain transaction
         spc.vin.append(
             CTxIn(
-                COutPoint(txid_to_bytes(get_tx(next_pos - 1).id), 0),
+                COutPoint(int(get_tx(next_pos - 1).id, 16), 0),
                 nSequence=0,
             ),
         )
@@ -90,7 +87,7 @@ def mine_next_block_flow(
 
     spc.vin.append(
         # from our funding transaction using our own pubkey
-        CTxIn(COutPoint(our_tx.GetTxid(), 0), nSequence=0),
+        CTxIn(COutPoint(int(our_tx.hash, 16), 0), nSequence=0),
     )
     spc_tx = wallet.sign(spc, len(spc.vin) - 1, fee_bid)
 
@@ -117,9 +114,7 @@ def mine_next_block_flow(
     print(yellow(f"> published {bold(white(spc_txid))}."))
 
     with s() as db:
-        print("saving", spc_txid, "to", next_pos)
         db["txs"][next_pos].id = spc_txid
-        print("here", db["txs"][next_pos].id)
         db["txs"][next_pos].spacechain_block_hash = spacechain_block_hash
 
 
@@ -152,7 +147,7 @@ def find_spacechain_position_flow():
         redeem_script = CScript(
             [
                 get_tx(i).ctv_hash(),
-                OP_CHECKTEMPLATEVERIFY,
+                script.OP_CHECKTEMPLATEVERIFY,
             ]
         )
         res = rpc.scantxoutset("start", [f"raw({redeem_script.hex()})"])
@@ -207,7 +202,7 @@ def get_tx(i) -> SpacechainTx:
 
     # the last tx in the chain is always the same
     if i == CHAIN_MAX + 1:
-        last = CMutableTransaction()
+        last = CTransaction()
         last.nVersion = 2
         last.vin = [
             # CTV works with blank inputs, we will fill in later
@@ -221,14 +216,15 @@ def get_tx(i) -> SpacechainTx:
                 CScript([script.OP_RETURN, "simple-spacechain".encode("utf-8")]),
             )
         ]
+        last.rehash()
 
         with s() as db:
-            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(last))
+            db["txs"][i] = SpacechainTx(tmpl_bytes=last.serialize())
     else:
         # recursion: we need the next one to calculate its CTV hash and commit here
         next = get_tx(i + 1)
 
-        tx = CMutableTransaction()
+        tx = CTransaction()
         tx.nVersion = 2
         tx.vin = [
             # CTV works with blank inputs, we will fill in later
@@ -249,14 +245,15 @@ def get_tx(i) -> SpacechainTx:
                 CScript(
                     [
                         next.ctv_hash(),  # CTV hash
-                        OP_CHECKTEMPLATEVERIFY,
+                        script.OP_CHECKTEMPLATEVERIFY,
                     ]
                 ),
             ),
         ]
+        tx.rehash()
 
         with s() as db:
-            db["txs"][i] = SpacechainTx(tmpl_bytes=marshal_tx(tx))
+            db["txs"][i] = SpacechainTx(tmpl_bytes=tx.serialize())
 
     return get_tx(i)
 

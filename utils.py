@@ -6,18 +6,16 @@ import hashlib
 from typing import List, Optional
 from dataclasses import dataclass
 from contextlib import contextmanager
-from bitcoin.core import (
-    script,
-    CMutableTransaction,
-    CTransaction,
-    COutPoint,
+from test_framework import script
+from test_framework.messages import (
     COIN,
+    COutPoint,
     CTxWitness,
+    CTransaction,
     CTxInWitness,
     CScriptWitness,
 )
-from bitcoin.core.script import CScript, OPCODE_NAMES
-from bitcoin.wallet import CBech32BitcoinAddress
+from test_framework.script import CScript, OPCODE_NAMES
 from buidl.hd import HDPrivateKey, PrivateKey
 from rpc import BitcoinRPC, JSONRPCError
 
@@ -46,10 +44,13 @@ class SpacechainTx:
     @property
     def template(self):
         if self.tmpl_bytes:
-            return unmarshal_tx(self.tmpl_bytes)
+            tx = CTransaction()
+            tx.deserialize(io.BytesIO(self.tmpl_bytes))
+            tx.rehash()
+            return tx
 
     def ctv_hash(self, input_index=0):
-        return get_standard_template_hash(self.template, input_index)
+        return self.template.get_standard_template_hash(input_index)
 
 
 @dataclass
@@ -69,7 +70,7 @@ class Wallet:
         for utxo in res["unspents"]:
             self.coins.append(
                 Coin(
-                    COutPoint(txid_to_bytes(utxo["txid"]), utxo["vout"]),
+                    COutPoint(int(utxo["txid"], 16), utxo["vout"]),
                     int(utxo["amount"] * COIN),
                     utxo["height"],
                 )
@@ -93,10 +94,10 @@ class Wallet:
 
         raise ValueError("no coins!")
 
-    def sign(self, tx: CMutableTransaction, input_index: int, satoshis: int):
+    def sign(self, tx: CTransaction, input_index: int, satoshis: int):
         pubkey160 = self.privkey.point.hash160()
 
-        sighash = script.SignatureHash(
+        sighash = script.SegwitV0SignatureHash(
             # this is how the p2wpkh redeem script looks for sighashes
             CScript(
                 [
@@ -111,26 +112,18 @@ class Wallet:
             input_index,
             script.SIGHASH_ALL,
             amount=satoshis,
-            sigversion=script.SIGVERSION_WITNESS_V0,
         )
 
         sig = self.privkey.sign(int.from_bytes(sighash, "big")).der() + bytes(
             [script.SIGHASH_ALL]
         )
-        tx.wit = CTxWitness(
-            [
-                CTxInWitness(
-                    CScriptWitness(
-                        [
-                            sig,
-                            self.privkey.point.sec(),
-                        ],
-                    ),
-                ),
-            ]
-        )
+        tx.wit.vtxinwit.append(CTxInWitness())
+        tx.wit.vtxinwit[0].scriptWitness.stack = [
+            sig,
+            self.privkey.point.sec(),
+        ]
 
-        return CTransaction.from_tx(tx)
+        return CTransaction(tx)
 
 
 @dataclass(frozen=True)
@@ -140,80 +133,14 @@ class Coin:
     height: int
 
 
-def sha256(s) -> bytes:
-    return hashlib.sha256(s).digest()
-
-
-def ser_compact_size(l) -> bytes:
-    r = b""
-    if l < 253:
-        r = struct.pack("B", l)
-    elif l < 0x10000:
-        r = struct.pack("<BH", 253, l)
-    elif l < 0x100000000:
-        r = struct.pack("<BI", 254, l)
-    else:
-        r = struct.pack("<BQ", 255, l)
-    return r
-
-
-def ser_string(s) -> bytes:
-    return ser_compact_size(len(s)) + s
-
-
-def get_standard_template_hash(tx: CTransaction, nIn: int) -> bytes:
-    r = b""
-    r += struct.pack("<i", tx.nVersion)
-    r += struct.pack("<I", tx.nLockTime)
-    vin = tx.vin or []
-    vout = tx.vout or []
-    for i in range(len(vin)):
-        inp = vin[i]
-        if inp.scriptSig and inp.scriptSig.is_p2sh():
-            r += sha256(ser_string(inp.scriptSig))
-    r += struct.pack("<I", len(tx.vin))
-    r += sha256(b"".join(struct.pack("<I", inp.nSequence) for inp in vin))
-    r += struct.pack("<I", len(tx.vout))
-    r += sha256(b"".join(out.serialize() for out in vout))
-    r += struct.pack("<I", nIn)
-    return sha256(r)
-
-
 def format_cscript(script: CScript) -> str:
     return " ".join(
         [str(el) if el in OPCODE_NAMES else shorten(el.hex()) for el in script]
     )
 
 
-def txid_to_bytes(txid: str) -> bytes:
-    """Convert the txids output by Bitcoin Core (little endian) to bytes."""
-    return bytes.fromhex(txid)[::-1]
-
-
-def bytes_to_txid(b: bytes) -> str:
-    """Convert big-endian bytes to Core-style txid str."""
-    return b[::-1].hex()
-
-
 def shorten(s: str) -> str:
     return s[0:4] + "…" + s[-3:]
-
-
-def to_outpoint(txid: str, n: int) -> COutPoint:
-    return COutPoint(txid_to_bytes(txid), n)
-
-
-def marshal_tx(tx: CTransaction) -> bytes:
-    f = io.BytesIO()
-    tx.stream_serialize(f, True)
-    raw = f.getvalue()
-    return raw
-
-
-def unmarshal_tx(b: bytes) -> CMutableTransaction:
-    f = io.BytesIO(b)
-    tx = CTransaction.stream_deserialize(f)
-    return CMutableTransaction.from_tx(tx)
 
 
 def make_color(start, end):
